@@ -13,10 +13,10 @@ from flask import Flask, request, render_template, flash, redirect, url_for, Res
 import warnings
 import uuid
 from io import BytesIO
+import math
 
 print("Starting Flask app...")
 
-# Suppress PyTorch FutureWarning for backward hooks
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.modules.module")
 
 app = Flask(__name__)
@@ -24,7 +24,6 @@ app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['SECRET_KEY'] = 'your-secret-key'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Define Hook class for Grad-CAM
 class Hook:
     def __init__(self):
         self.forward_out = None
@@ -44,7 +43,6 @@ class Hook:
         self.hook_f.remove()
         self.hook_b.remove()
 
-# Define SEBlock
 class SEBlock(nn.Module):
     def __init__(self, in_channels, reduction=16):
         super(SEBlock, self).__init__()
@@ -62,7 +60,6 @@ class SEBlock(nn.Module):
         y = self.fc(y).view(b, c, 1, 1)
         return x * y.expand_as(x)
 
-# Define ResidualBlock
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch, stride=1):
         super(ResidualBlock, self).__init__()
@@ -83,7 +80,6 @@ class ResidualBlock(nn.Module):
         out += self.shortcut(x)
         return F.relu(out)
 
-# Define ResEmoteNet
 class ResEmoteNet(nn.Module):
     def __init__(self, num_classes=7):
         super(ResEmoteNet, self).__init__()
@@ -129,25 +125,45 @@ class ResEmoteNet(nn.Module):
         x = self.fc4(x)
         return x
 
-# Set the device
+def calculate_emotion_weight(emotion_angles):
+    emotion_weight = {}
+    for i, angle in emotion_angles.items():
+        rad = math.radians(angle)
+        weight = math.cos(rad)
+        if i == 6:  # Neutral
+            weight = 0.0
+        elif i == 1:  # Surprise
+            weight = 0.5
+        emotion_weight[i] = weight
+    return emotion_weight
+
+def get_satisfaction_category(si):
+    if si > 0.75:
+        return "Satisfactory"
+    elif si >= 0.5 and si <= 0.75:
+        return "Neutral"
+    elif si < 0.5:
+        return "Dissatisfactory"
+
+emotion_angles = {
+    0: 7.8,    # Happy
+    1: 48.6,   # Surprise
+    2: 207.5,  # Sad
+    3: 120.0,  # Anger
+    4: 240.0,  # Disgust
+    5: 150.0,  # Fear
+    6: 90.0    # Neutral
+}
+
+emotion_weight = calculate_emotion_weight(emotion_angles)
+w_min = min(emotion_weight.values())
+w_max = max(emotion_weight.values())
+
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 print(f"Using {device}")
 
-# Define emotion labels
 class_labels = ['Happy', 'Surprise', 'Sad', 'Anger', 'Disgust', 'Fear', 'Neutral']
 
-# Define valence scores for Satisfaction Index
-valence_scores = {
-    'Happy': 0.9,
-    'Surprise': 0.6,
-    'Neutral': 0.5,
-    'Fear': 0.4,
-    'Sad': 0.3,
-    'Anger': 0.2,
-    'Disgust': 0.1
-}
-
-# Load the model
 model = ResEmoteNet(num_classes=7).to(device)
 model_path = "./models/best_model_resemotenet_80.pth"
 if not os.path.exists(model_path):
@@ -158,12 +174,10 @@ if not os.path.exists(model_path):
 model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
 model.eval()
 
-# Register Grad-CAM hook
 final_layer = model.conv3
 hook = Hook()
 hook.register_hook(final_layer)
 
-# Image transformation
 transform = transforms.Compose([
     transforms.Resize((64, 64)),
     transforms.Grayscale(num_output_channels=3),
@@ -171,32 +185,12 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-# Text settings for visualization
 font = cv2.FONT_HERSHEY_SIMPLEX
 font_scale = 0.7
-font_color = (154, 1, 254)  # Neon pink in BGR
+font_color = (154, 1, 254)
 thickness = 2
 line_type = cv2.LINE_AA
 transparency = 0.4
-
-# Function to calculate Satisfaction Index
-def calculate_satisfaction_index(emotion_probabilities):
-    satisfaction_index = sum(emotion_probabilities[emotion] * valence_scores[emotion] 
-                             for emotion in emotion_probabilities)
-    return satisfaction_index
-
-# Function to get Satisfaction Category
-def get_satisfaction_category(satisfaction_index):
-    if satisfaction_index >= 0.8:
-        return "Very Satisfied"
-    elif satisfaction_index >= 0.6:
-        return "Satisfied"
-    elif satisfaction_index >= 0.4:
-        return "Neutral"
-    elif satisfaction_index >= 0.2:
-        return "Dissatisfied"
-    else:
-        return "Very Dissatisfied"
 
 def detect_emotion(pil_crop_img):
     try:
@@ -207,9 +201,8 @@ def detect_emotion(pil_crop_img):
         probabilities = F.softmax(logits, dim=1)
         predicted_class = torch.argmax(probabilities, dim=1)
         predicted_class_idx = predicted_class.item()
-        confidence = probabilities[0][predicted_class_idx].item() * 100  # Convert to percentage
+        confidence = probabilities[0][predicted_class_idx].item() * 100
 
-        # Backward pass for Grad-CAM
         one_hot_output = torch.FloatTensor(1, probabilities.shape[1]).zero_().to(device)
         one_hot_output[0][predicted_class_idx] = 1
         logits.backward(gradient=one_hot_output, retain_graph=True)
@@ -226,25 +219,13 @@ def detect_emotion(pil_crop_img):
 
         scores = probabilities.cpu().detach().numpy().flatten()
         rounded_scores = [round(score, 2) for score in scores]
-        
-        # Calculate Satisfaction Index
-        emotion_probabilities = dict(zip(class_labels, scores))
-        satisfaction_index = calculate_satisfaction_index(emotion_probabilities)
-        
-        return rounded_scores, cam, confidence, satisfaction_index  # Return satisfaction_index as well
+        return rounded_scores, cam, confidence
     except Exception as e:
         print(f"Error in detect_emotion: {e}")
-        return None, None, None, None
+        return None, None, None
 
 def plot_heatmap(x, y, w, h, cam, pil_crop_img, image):
     try:
-        # cam = cv2.resize(cam, (w, h))
-        # heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
-        # heatmap = np.float32(heatmap) / 255
-        # roi = image[y:y + h, x:x + w, :]
-        # overlay = heatmap * transparency + roi / 255 * (1 - transparency)
-        # overlay = np.clip(overlay, 0, 1)
-        # image[y:y + h, x:x + w, :] = np.uint8(255 * overlay)
         pass
     except Exception as e:
         print(f"Error in plot_heatmap: {e}")
@@ -253,18 +234,15 @@ def update_max_emotion(rounded_scores):
     max_index = np.argmax(rounded_scores)
     return class_labels[max_index]
 
-def print_max_emotion(x, y, max_emotion, image, confidence=None, satisfaction_index=None):
-    org = (x, y - 35)
-    if confidence is not None and satisfaction_index is not None:
-        category = get_satisfaction_category(satisfaction_index)  # Define category
-        text = f"Emotion: {max_emotion} {confidence:.2f}%\nCSat: {satisfaction_index:.2f} ({category})"
-        lines = text.split('\n')  # Split text at newline
-        for i, line in enumerate(lines):
-            y_offset = org[1] + i * 25  # Adjust y-coordinate for each line (25 pixels apart)
-            cv2.putText(image, line, (org[0], y_offset), font, font_scale, font_color, thickness, line_type)
-    else:
-        cv2.putText(image, max_emotion, org, font, font_scale, font_color, thickness, line_type)
-        
+def print_max_emotion(x, y, max_emotion, image, confidence=None, si=None, category=None):
+    org = (x, y - 15)
+    text = f"{max_emotion}: {confidence:.2f}%" if confidence is not None else max_emotion
+    cv2.putText(image, text, org, font, font_scale, font_color, thickness, line_type)
+    if si is not None and category is not None:
+        org2 = (x, y - 35)
+        text2 = f"SI: {si:.2f} ({category})"
+        cv2.putText(image, text2, org2, font, font_scale, font_color, thickness, line_type)
+
 def print_all_emotion(x, y, w, rounded_scores, image):
     org = (x + w + 10, y)
     for index, value in enumerate(class_labels):
@@ -280,8 +258,8 @@ def detect_bounding_box(image, use_mediapipe=True):
             with mp_face_detection.FaceDetection(min_detection_confidence=0.5) as face_detection:
                 results = face_detection.process(image)
                 if not results.detections:
-                    return faces, {}  # Return empty faces and scores
-                emotion_scores_dict = {}  # Store emotion scores, confidence, and satisfaction for each face
+                    return faces, {}
+                emotion_scores_dict = {}
                 for i, detection in enumerate(results.detections):
                     bbox = detection.location_data.relative_bounding_box
                     h, w, _ = image.shape
@@ -298,20 +276,23 @@ def detect_bounding_box(image, use_mediapipe=True):
                     faces[f'face_{i}'] = {'facial_area': [x1, y1, x2, y2]}
                     cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     pil_crop_img = Image.fromarray(image[y1:y2, x1:x2])
-                    rounded_scores, cam, confidence, satisfaction_index = detect_emotion(pil_crop_img)  # Unpack satisfaction_index
-                    if rounded_scores is None or cam is None or confidence is None or satisfaction_index is None:
+                    rounded_scores, cam, confidence = detect_emotion(pil_crop_img)
+                    if rounded_scores is None or cam is None or confidence is None:
                         continue
+                    si = sum(rounded_scores[j] * emotion_weight[j] for j in range(7))
+                    si_normalized = (si - w_min) / (w_max - w_min)
+                    si_normalized = max(0, min(1, si_normalized))
+                    category = get_satisfaction_category(si_normalized)
                     emotion_scores_dict[f'face_{i}'] = {
                         'scores': rounded_scores,
                         'confidence': round(confidence, 2),
-                        'satisfaction_index': round(satisfaction_index, 2)  # Store satisfaction_index
+                        'satisfaction_index': round(si_normalized, 2),
+                        'satisfaction_category': category
                     }
                     max_emotion = update_max_emotion(rounded_scores)
                     plot_heatmap(x1, y1, x2 - x1, y2 - y1, cam, pil_crop_img, image)
-                    print_max_emotion(x1, y1, max_emotion, image, confidence, satisfaction_index)  # Pass satisfaction_index
-                    # Comment out or remove the following line to stop printing all scores
-                    # print_all_emotion(x1, y1, x2 - x1, rounded_scores, image)
-        return faces, emotion_scores_dict  # Return faces and their scores/confidence/satisfaction
+                    print_max_emotion(x1, y1, max_emotion, image, confidence, si_normalized, category)
+        return faces, emotion_scores_dict
     except Exception as e:
         print(f"Error in detect_bounding_box: {e}")
         return {}, {}
@@ -321,24 +302,17 @@ def process_frame(frame, frame_id, results):
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         faces, emotion_scores_dict = detect_bounding_box(frame_rgb)
         frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
         if results is not None:
             frame_results = {'frame_id': frame_id, 'faces': []}
             for face_id, data in faces.items():
                 if face_id in emotion_scores_dict:
-                    x1, y1, x2, y2 = data['facial_area']
-                    scores = emotion_scores_dict[face_id]['scores']
-                    confidence = emotion_scores_dict[face_id]['confidence']
-                    satisfaction_index = emotion_scores_dict[face_id]['satisfaction_index']
-                    emotion_scores = dict(zip(class_labels, [round(score, 2) for score in scores]))
-                    max_emotion = max(emotion_scores, key=emotion_scores.get)
                     frame_results['faces'].append({
                         'face_id': face_id,
-                        'emotion_scores': emotion_scores,
-                        'max_emotion': max_emotion,
-                        'confidence': confidence,
-                        'satisfaction_index': satisfaction_index,
-                        'satisfaction_category': get_satisfaction_category(satisfaction_index)  # Add category
+                        'emotion_scores': dict(zip(class_labels, emotion_scores_dict[face_id]['scores'])),
+                        'max_emotion': update_max_emotion(emotion_scores_dict[face_id]['scores']),
+                        'confidence': emotion_scores_dict[face_id]['confidence'],
+                        'satisfaction_index': emotion_scores_dict[face_id]['satisfaction_index'],
+                        'satisfaction_category': emotion_scores_dict[face_id]['satisfaction_category']
                     })
             if frame_results['faces']:
                 results.append(frame_results)
@@ -361,7 +335,6 @@ def upload_image():
             filename = str(uuid.uuid4()) + '.jpg'
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
-            
             image = cv2.imread(filepath)
             if image is None:
                 flash('Invalid image file')
@@ -372,27 +345,21 @@ def upload_image():
             output_filename = f'processed_{filename}'
             output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
             cv2.imwrite(output_path, image_bgr)
-            
             results = []
             for face_id, data in faces.items():
                 if face_id in emotion_scores_dict:
-                    scores = emotion_scores_dict[face_id]['scores']
-                    confidence = emotion_scores_dict[face_id]['confidence']
-                    satisfaction_index = emotion_scores_dict[face_id]['satisfaction_index']
-                    emotion_scores = dict(zip(class_labels, [round(score, 2) for score in scores]))
-                    max_emotion = max(emotion_scores, key=emotion_scores.get)
+                    emotion_scores = dict(zip(class_labels, emotion_scores_dict[face_id]['scores']))
+                    max_emotion = update_max_emotion(emotion_scores_dict[face_id]['scores'])
                     results.append({
                         'face_id': face_id,
                         'emotion_scores': emotion_scores,
                         'max_emotion': max_emotion,
-                        'confidence': confidence,
-                        'satisfaction_index': satisfaction_index,
-                        'satisfaction_category': get_satisfaction_category(satisfaction_index)  # Add category
+                        'confidence': emotion_scores_dict[face_id]['confidence'],
+                        'satisfaction_index': emotion_scores_dict[face_id]['satisfaction_index'],
+                        'satisfaction_category': emotion_scores_dict[face_id]['satisfaction_category']
                     })
-            
             hook.unregister_hook()
             return render_template('result.html', output_image=output_filename, results=results)
-    
     return render_template('index.html')
 
 @app.route('/video', methods=['GET', 'POST'])
@@ -409,26 +376,18 @@ def upload_video():
             filename = str(uuid.uuid4()) + '.mp4'
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
-            
-            # Process video
             cap = cv2.VideoCapture(filepath)
             if not cap.isOpened():
                 flash('Invalid video file')
                 return redirect(request.url)
-            
-            # Get video properties
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            
-            # Initialize output video
             output_filename = f'processed_{filename}'
             output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-            
-            # Process frames (sample every 30th frame for results to reduce output size)
             results = []
             frame_id = 0
             while cap.isOpened():
@@ -438,13 +397,10 @@ def upload_video():
                 processed_frame = process_frame(frame, frame_id, results if frame_id % 30 == 0 else None)
                 out.write(processed_frame)
                 frame_id += 1
-            
             cap.release()
             out.release()
-            
             hook.unregister_hook()
             return render_template('video_result.html', output_video=output_filename, results=results)
-    
     return render_template('video_upload.html')
 
 @app.route('/camera')
@@ -452,19 +408,18 @@ def camera_feed():
     return render_template('camera.html')
 
 def generate_camera_feed():
-    cap = cv2.VideoCapture(0)  # Open default camera
+    cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: Could not open camera.")
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + b'' + b'\r\n')
         return
-    
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            processed_frame = process_frame(frame, 0, None)  # Process without storing results
+            processed_frame = process_frame(frame, 0, None)
             ret, buffer = cv2.imencode('.jpg', processed_frame)
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
