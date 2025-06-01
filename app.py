@@ -12,7 +12,6 @@ import mediapipe as mp
 from flask import Flask, request, render_template, flash, redirect, url_for, Response
 import warnings
 import uuid
-from io import BytesIO
 import math
 
 print("Starting Flask app...")
@@ -142,7 +141,7 @@ def get_satisfaction_category(si):
         return "Satisfactory"
     elif si >= 0.5 and si <= 0.75:
         return "Neutral"
-    elif si < 0.5:
+    else:
         return "Dissatisfactory"
 
 emotion_angles = {
@@ -297,7 +296,7 @@ def detect_bounding_box(image, use_mediapipe=True):
         print(f"Error in detect_bounding_box: {e}")
         return {}, {}
 
-def process_frame(frame, frame_id, results):
+def process_frame(frame, frame_id, results=None):
     try:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         faces, emotion_scores_dict = detect_bounding_box(frame_rgb)
@@ -376,32 +375,38 @@ def upload_video():
             filename = str(uuid.uuid4()) + '.mp4'
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
-            cap = cv2.VideoCapture(filepath)
-            if not cap.isOpened():
-                flash('Invalid video file')
-                return redirect(request.url)
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = int(cap.get(cv2.CAP_PROP_FPS))
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            output_filename = f'processed_{filename}'
-            output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-            results = []
-            frame_id = 0
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                processed_frame = process_frame(frame, frame_id, results if frame_id % 30 == 0 else None)
-                out.write(processed_frame)
-                frame_id += 1
-            cap.release()
-            out.release()
-            hook.unregister_hook()
-            return render_template('video_result.html', output_video=output_filename, results=results)
+            # Store the filepath in session or pass to the streaming route
+            return render_template('video_stream.html', video_path=filepath)
     return render_template('video_upload.html')
+
+def generate_video_feed(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print("Error: Could not open video.")
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + b'' + b'\r\n')
+        return
+    try:
+        frame_id = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            processed_frame = process_frame(frame, frame_id)
+            ret, buffer = cv2.imencode('.jpg', processed_frame)
+            if not ret:
+                continue
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            frame_id += 1
+    finally:
+        cap.release()
+
+@app.route('/video_stream_upload/<path:video_path>')
+def video_stream_upload(video_path):
+    return Response(generate_video_feed(video_path),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/camera')
 def camera_feed():
@@ -415,15 +420,19 @@ def generate_camera_feed():
                b'Content-Type: image/jpeg\r\n\r\n' + b'' + b'\r\n')
         return
     try:
+        frame_id = 0
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            processed_frame = process_frame(frame, 0, None)
+            processed_frame = process_frame(frame, frame_id)
             ret, buffer = cv2.imencode('.jpg', processed_frame)
+            if not ret:
+                continue
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            frame_id += 1
     finally:
         cap.release()
 
