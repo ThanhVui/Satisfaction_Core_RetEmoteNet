@@ -25,7 +25,7 @@
         /* Enhanced button styles */
         .btn-upload {
             transition: all 0.3s ease;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 4px 6px rgba_gradient60;
         }
         .btn-upload:hover {
             background-color: #1d4ed8; /* Darker blue on hover */
@@ -38,7 +38,7 @@
             visibility: hidden;
         }
         .custom-file-input::before {
-            content: 'Choose Image';
+            content: 'Choose File';
             display: inline-block;
             background: #dbeafe;
             color: #1e40af;
@@ -77,15 +77,32 @@
                 space-x-4; /* Reduce spacing between links on mobile */
             }
         }
+
+        /* Additional styles for camera feed */
+        video, canvas {
+            display: none; /* Hide raw video and canvas */
+        }
+        #frame {
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+        #results {
+            margin-top: 1rem;
+            background-color: white;
+            padding: 1rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
     <!-- Header Bar -->
-    <nav class="bg-blue-700 p-2 shadow-lg" style="position: fixed; top: 0; left: 0; right: 0; z-index: 10;">
+    <nav class="bg-blue-600 p-2 shadow-lg" style="position: fixed; top: 0; left: 0; right: 0; z-index: 10;">
         <div class="container mx-auto flex items-center justify-between">
             <!-- Logo -->
             <a href="{{ url_for('upload_image') }}">
-                <img style="border-radius: 10px; height: 50px; width: 120px; padding: 0;" src="{{ url_for('static', filename='uploads/THD-Logo.png') }}" alt="Emotion Detection Logo" class="nav-logo">
+                <img style="border-radius: 10px; height: 50px; width: 120px; padding: 0;" src="{{ url_for('static', filename='Uploads/THD-Logo.png') }}" alt="Emotion Detection Logo" class="nav-logo">
             </a>
             <!-- Navigation Links -->
             <div class="flex space-x-8 nav-links">
@@ -95,20 +112,106 @@
             </div>
         </div>
     </nav>
+
     <!-- Main Content -->
-    <div class="container mx-auto p-20">
+    <div class="container mx-auto p-6 pt-20">
         <h1 class="text-3xl font-bold mb-6 text-center">Live Camera Emotion Detection</h1>
-        <div class="mb-6">
-            <img src="{{ url_for('video_stream') }}" class="mx-auto rounded-lg shadow-lg max-w-full h-auto"
-                 alt="Live Camera Feed">
+        <div class="mb-6 flex justify-center">
+            <img id="frame" class="mx-auto rounded-lg shadow-lg max-w-full h-auto" alt="Live Camera Feed">
         </div>
-        <div class="text-center">
+        <div id="results" class="text-center"></div>
+        <div class="text-center mt-4">
             <p class="text-gray-600">Real-time emotion detection from your camera feed.</p>
-            <a href="{{ url_for('camera_feed') }}"
-               class="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 mt-4 inline-block">
+            <button id="restart-btn" class="btn-upload bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 mt-4">
                 Restart Camera Feed
-            </a>
+            </button>
         </div>
     </div>
+
+    <script>
+        const video = document.createElement('video');
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const frameImg = document.getElementById('frame');
+        const resultsDiv = document.getElementById('results');
+        const restartBtn = document.getElementById('restart-btn');
+
+        let stream = null;
+
+        // Start camera feed
+        function startCamera() {
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(s => {
+                    stream = s;
+                    video.srcObject = stream;
+                    video.play();
+                    canvas.width = video.videoWidth || 640;
+                    canvas.height = video.videoHeight || 480;
+                    sendFrames();
+                })
+                .catch(err => {
+                    console.error("Error accessing camera: ", err);
+                    resultsDiv.innerHTML = "<p class='text-red-500'>Error accessing camera. Please allow camera access.</p>";
+                });
+        }
+
+        // Stop camera feed
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+                video.srcObject = null;
+                frameImg.src = '';
+                resultsDiv.innerHTML = '';
+            }
+        }
+
+        // Send frames to server
+        function sendFrames() {
+            if (!stream) return;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataURL = canvas.toDataURL('image/jpeg', 0.7); // Reduce quality to 70%
+            frameImg.src = dataURL;
+
+            fetch('/process_camera_frame', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: dataURL })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    resultsDiv.innerHTML = `<p class='text-red-500'>Error: ${data.error}</p>`;
+                } else {
+                    let html = '';
+                    if (data.results && data.results.length > 0) {
+                        data.results.forEach(result => {
+                            html += `<p class='text-gray-800'>Face ${result.face_id.replace('face_', '')}: ${result.max_emotion} (${result.confidence}%), SI: ${result.satisfaction_index} (${result.satisfaction_category})</p>`;
+                        });
+                    } else {
+                        html = "<p class='text-gray-600'>No faces detected.</p>";
+                    }
+                    resultsDiv.innerHTML = html;
+                    frameImg.src = data.image; // Display processed frame with annotations
+                }
+                // Continue sending frames
+                setTimeout(sendFrames, 200); // Send every 200ms
+            })
+            .catch(err => {
+                console.error("Error sending frame: ", err);
+                resultsDiv.innerHTML = "<p class='text-red-500'>Error communicating with server.</p>";
+                setTimeout(sendFrames, 200);
+            });
+        }
+
+        // Restart button handler
+        restartBtn.addEventListener('click', () => {
+            stopCamera();
+            startCamera();
+        });
+
+        // Start camera on page load
+        startCamera();
+    </script>
 </body>
 </html>

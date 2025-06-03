@@ -9,10 +9,13 @@ from PIL import Image
 import cv2
 import numpy as np
 import mediapipe as mp
-from flask import Flask, request, render_template, flash, redirect, url_for, Response
+from flask import Flask, request, render_template, flash, redirect, url_for, Response, jsonify # Thêm jsonify
 import warnings
 import uuid
 import math
+import base64 # Thêm base64
+from io import BytesIO # Thêm BytesIO
+import time
 
 print("Starting Flask app...")
 
@@ -320,6 +323,51 @@ def process_frame(frame, frame_id, results=None):
         print(f"Error in process_frame: {e}")
         return frame
 
+# New route to process frames from client-side camera
+@app.route('/process_camera_frame', methods=['POST'])
+def process_camera_frame():
+    try:
+        data = request.get_json()
+        if not data or 'image' not in data:
+            return jsonify({'error': 'No image data provided'}), 400
+        
+        # Decode base64 image
+        img_data = data['image'].split(',')[1]
+        img_bytes = base64.b64decode(img_data)
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # Process frame
+        frame_id = int(time.time() * 1000)  # Use timestamp as frame_id
+        results = []
+        processed_frame = process_frame(frame, frame_id, results)
+        
+        # Convert processed frame back to base64 for display
+        _, buffer = cv2.imencode('.jpg', processed_frame)
+        processed_img_data = base64.b64encode(buffer).decode('utf-8')
+        
+        # Convert float32 to float for JSON serialization
+        serialized_results = []
+        if results:
+            for result in results[0]['faces']:
+                serialized_result = {
+                    'face_id': result['face_id'],
+                    'emotion_scores': {k: float(v) for k, v in result['emotion_scores'].items()},
+                    'max_emotion': result['max_emotion'],
+                    'confidence': float(result['confidence']),
+                    'satisfaction_index': float(result['satisfaction_index']),
+                    'satisfaction_category': result['satisfaction_category']
+                }
+                serialized_results.append(serialized_result)
+        
+        return jsonify({
+            'results': serialized_results if serialized_results else [],
+            'image': f'data:image/jpeg;base64,{processed_img_data}'
+        })
+    except Exception as e:
+        print(f"Error in process_camera_frame: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/', methods=['GET', 'POST'])
 def upload_image():
     if request.method == 'POST':
@@ -375,7 +423,6 @@ def upload_video():
             filename = str(uuid.uuid4()) + '.mp4'
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
-            # Store the filepath in session or pass to the streaming route
             return render_template('video_stream.html', video_path=filepath)
     return render_template('video_upload.html')
 
