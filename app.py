@@ -9,12 +9,12 @@ from PIL import Image
 import cv2
 import numpy as np
 import mediapipe as mp
-from flask import Flask, request, render_template, flash, redirect, url_for, Response, jsonify # Thêm jsonify
+from flask import Flask, request, render_template, flash, redirect, url_for, Response, jsonify
 import warnings
 import uuid
 import math
-import base64 # Thêm base64
-from io import BytesIO # Thêm BytesIO
+import base64
+from io import BytesIO
 import time
 
 print("Starting Flask app...")
