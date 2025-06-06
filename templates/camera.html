@@ -195,12 +195,12 @@
                     frameImg.src = data.image; // Display processed frame with annotations
                 }
                 // Continue sending frames
-                setTimeout(sendFrames, 500); // Send every 500ms
+                setTimeout(sendFrames, 200); // Send every 200ms
             })
             .catch(err => {
                 console.error("Error sending frame: ", err);
                 resultsDiv.innerHTML = "<p class='text-red-500'>Error communicating with server.</p>";
-                setTimeout(sendFrames, 500);
+                setTimeout(sendFrames, 200);
             });
         }
 
